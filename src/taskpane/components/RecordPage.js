@@ -16,6 +16,7 @@ import recordingStartIcon from "../../../assets/recordingStartIcon.png";
 import recordingStopIcon from "../../../assets/recordingStopIcon.png";
 import stopButton from "../../../assets/stopButton.png";
 import Chip from "@mui/material/Chip";
+import { printInOutlook } from "../../../modules/outlookFunction";
 
 export default class RecordPage extends React.Component {
   constructor(props, context) {
@@ -36,6 +37,8 @@ export default class RecordPage extends React.Component {
       recordingTime: 0,
       isLoading: false,
       isSocketConnected: false,
+      index: 0,
+      endOfStream: false,
     };
   }
 
@@ -45,20 +48,36 @@ export default class RecordPage extends React.Component {
    * "result" event is a listen event to keep listening the responses
    */
   initializeSocket = () => {
-    this.socket = io(process.env.SOCKET_ADDRESS, { transports: ["websocket"] });
+    this.socket = io(process.env.SOCKET_ADDRESS, { transports: ["websocket"], rejectUnauthorized: false });
     this.socket.on("connect", () => {
       console.log("Socket connected");
       this.setState({ isSocketConnected: true });
     });
-    this.socket.on("result", (data) => {
+    this.socket.on("result_upload", (data) => {
       console.log("Received result:", data);
       console.log(data.text);
-      this.printInOutlook(data.text);
+      let res = "";
+    
+      for (let wordData of data.output.predicted_words) {
+        let word = wordData.word;
+        let isConfident = wordData.is_confident;
+
+        if (!isConfident && word !== " ") {
+          res += word;
+        } else {
+          res += word;
+        }
+      }
+    
+      console.log(res);
+      if (res !== "" && res !== " "){
+        printInOutlook(res);
+      }
     });
     this.socket.on("last_result", (data) => {
       console.log("Received last result:", data);
       console.log(data.text);
-      this.printInOutlook(data.text);
+      printInOutlook(data.text);
     });
   };
 
@@ -66,6 +85,12 @@ export default class RecordPage extends React.Component {
     this.setState({});
     if (this.state.isSocketConnected == false && this.state.isRecording) {
       this.initializeSocket();
+    }
+  }
+
+  componentWillUnmount() {
+    if(this.state.isRecording == true){
+      this.stopRecording();
     }
   }
 
@@ -79,48 +104,33 @@ export default class RecordPage extends React.Component {
   };
 
   /**
-   * Prints the received response from the socket to MS Excel
-   * Texts are printed from the current cursor position
-   * Prints only the first result from the response
-   * As the first response is the best prediction
-   * @param {string} text
-   */
-  printInOutlook = async (text) => {
-    Office.context.mailbox.item.getSelectedDataAsync(Office.CoercionType.Text, function (result) {
-      if (result.status === Office.AsyncResultStatus.Succeeded) {
-        var selectedText = result.value.toString() || ""; // Use an empty string if no text is selected
-        selectedText = selectedText.toString().replace("[object Object]", ""); // To remove the object captured everytime from the outlook context
-        var insertText = text.toString().split("|");
-        var newText = insertText[0] + " ";
-        var updatedText = selectedText + newText;
-
-        Office.context.mailbox.item.setSelectedDataAsync(
-          updatedText,
-          { coercionType: Office.CoercionType.Text },
-          function (result) {
-            if (result.status === Office.AsyncResultStatus.Succeeded) {
-              var cursorPosition = selectedText.length + newText.length;
-              Office.context.mailbox.item.body.getRange("end").select();
-              Office.context.mailbox.item.body.getRange("end").moveEnd("character", -cursorPosition);
-              Office.context.mailbox.item.body.getRange("end").select();
-            } else {
-              console.error("Error setting body: " + result.error.message);
-            }
-          }
-        );
-      } else {
-        console.error("Error getting selected data: " + result.error.message);
-      }
-    });
-  };
-
-  /**
    * Handles the Start Recording button
    */
   startRecording = async () => {
+    this.setState({
+      index: 0,
+      listItems: [],
+    });
+    this.chunks = [];
+    this.wavBuffer = [];
+    this.audioChunks = [];
+    this.wavFile = null;
+
+    // if (this.socket.connected == true && this.socket != null) {
+    //   this.socket.disconnect();
+    //   this.socket.connect(); 
+    // }
+
     if (this.state.isSocketConnected == false) {
       this.initializeSocket();
     }
+
+    if (this.socket.connected == true){
+      // console.log("Socket already connected");
+      this.socket.disconnect();
+      this.socket.connect();
+    }
+
     try {
       this.audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       this.mediaRecorder = new MediaRecorder(this.audioStream);
@@ -157,15 +167,13 @@ export default class RecordPage extends React.Component {
         const reader = new FileReader();
         reader.onload = (event) => {
           const base64String = window.btoa(event.target.result);
-          console.log(base64String);
-          this.socket.emit("audio_transmit", {
-            file: base64String,
+          console.log("Sending chunk", this.state.index, "End of Stream: ", this.state.index === sendChunks.length - 1);
+          this.socket.emit("audio_transmit_upload", {
+            index: this.state.index,
+            audio: base64String,
+            endOfStream: this.state.index === sendChunks.length - 1,
           });
-          if (i + 1 == sendChunks.length) {
-            this.socket.emit("audio_transmit", {
-              endOfStream: true,
-            });
-          }
+          this.setState({ index: this.state.index + 1 });
         };
         try {
           reader.readAsBinaryString(sendChunks[i]);
@@ -177,7 +185,7 @@ export default class RecordPage extends React.Component {
       this.wavBuffer = [];
       this.audioChunks = [];
       this.wavFile = null;
-      if (this.audioStream) {
+      if (this.audioStream) {  
         const tracks = this.audioStream.getTracks();
         tracks.forEach((track) => track.stop());
         this.audioStream = null;
